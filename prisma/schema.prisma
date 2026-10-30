@@ -1,0 +1,389 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum AuthProvider {
+  CREDENTIALS
+  GOOGLE
+}
+
+enum ConsentType {
+  TERMS_PRIVACY
+  VOICE_RECORDING
+  THIRD_PARTY_AI
+}
+
+enum ConsentStatus {
+  GRANTED
+  REVOKED
+}
+
+enum ContentStatus {
+  DRAFT
+  PUBLISHED
+  UNPUBLISHED
+}
+
+enum AspectCI {
+  KELANCARAN_JEDA
+  KEBERSIHAN_UCAPAN
+  TEMPO
+  CAKUPAN_ISI
+  STRUKTUR
+}
+
+enum MaterialType {
+  VIDEO
+  ARTIKEL
+  KUIS
+}
+
+enum SessionType {
+  ASSESSMENT
+  TEST
+  RETEST
+  DAILY
+}
+
+enum SessionStatus {
+  DRAFT
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+// 1. PENGGUNA APLIKASI UTAMA (Minimisasi Data: hanya birthYear & isAdult)
+model User {
+  id             String       @id @default(cuid())
+  nama           String
+  email          String       @unique
+  passwordHash   String?
+  authProvider   AuthProvider @default(CREDENTIALS)
+  tahunLahir     Int // Minimisasi data (Bagian 6.1 & 19.3)
+  isAdult        Boolean      @default(true)
+  statusPengguna String? // Mahasiswa / Fresh Graduate / Pekerja Muda
+  tujuanUtama    String[] // Array max 2 tujuan onboarding
+  createdAt      DateTime     @default(now())
+  deletedAt      DateTime?
+
+  consents         Consent[]
+  stats            UserStats?
+  quotas           UserQuota[]
+  confidenceLogs   SelfConfidenceLog[]
+  progress         UserProgress[]
+  dailyChallenges  UserDailyChallenge[]
+  xpLogs           XPLog[]
+  streakLogs       StreakLog[]
+  testSessions     TestSession[]
+  feedbackAccesses FeedbackAccess[]
+  feedbackRatings  FeedbackRating[]
+  subscriptions    Subscription[]
+}
+
+// 2. AKUN ADMIN CMS TERPISAH (Bagian 20 & 25.2 - ADM-1, ADM-10)
+model AdminUser {
+  id           String    @id @default(cuid())
+  nama         String
+  email        String    @unique
+  passwordHash String
+  role         String    @default("admin")
+  status       String    @default("active") // active | disabled
+  createdAt    DateTime  @default(now())
+  lastLoginAt  DateTime?
+
+  unitsCreated   Unit[]      @relation("UnitCreatedBy")
+  lessonsCreated Lesson[]    @relation("LessonCreatedBy")
+  casesCreated   CaseStudy[] @relation("CaseCreatedBy")
+}
+
+// 3. TIGA CONSENT TERPISAH (Bagian 6.2 - AUTH-3, AUTH-4, AUTH-5)
+model Consent {
+  id          String        @id @default(cuid())
+  userId      String
+  consentType ConsentType
+  docVersion  String        @default("v1.4")
+  status      ConsentStatus @default(GRANTED)
+  grantedAt   DateTime      @default(now())
+  revokedAt   DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, consentType])
+}
+
+// 4. GAMIFIKASI & KUOTA HARIAN (Reset Pukul 01.00 WIB - Bagian 10.9 & 13)
+model UserStats {
+  userId           String    @id
+  totalXp          Int       @default(0)
+  level            String    @default("Pemula") // Pemula (0-199), Menengah (200-799), Profesional (800+)
+  currentStreak    Int       @default(0)
+  longestStreak    Int       @default(0)
+  lastActivityDate String? // YYYY-MM-DD (Zona WIB dikurangi 1 jam)
+  fokusAspek       AspectCI?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model UserQuota {
+  id                 String @id @default(cuid())
+  userId             String
+  periode            String // YYYY-MM-DD (Tanggal kuota WIB -1 jam)
+  kuotaFeedbackDasar Int    @default(3)
+  kuotaFeedbackPakai Int    @default(0)
+  sesiHarianMaks     Int    @default(5)
+  sesiHarianPakai    Int    @default(0)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, periode])
+}
+
+model SelfConfidenceLog {
+  id      String   @id @default(cuid())
+  userId  String
+  nilai   Int // Skala 1 - 5
+  konteks String // onboarding | retest | berkala
+  tanggal DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// 5. KONTEN PEMBELAJARAN & STUDI KASUS (Dikelola Admin Web CMS - Bagian 11.1 & 25)
+model Unit {
+  id          String        @id @default(cuid())
+  nama        String
+  konteks     String // Daily Communication | Peer Communication | Public Speaking
+  urutan      Int           @unique
+  status      ContentStatus @default(DRAFT)
+  createdById String?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  createdBy AdminUser? @relation("UnitCreatedBy", fields: [createdById], references: [id])
+  lessons   Lesson[]
+}
+
+model Lesson {
+  id          String        @id @default(cuid())
+  unitId      String
+  judul       String
+  urutan      Int
+  targetAspek AspectCI
+  status      ContentStatus @default(DRAFT)
+  createdById String?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  unit         Unit               @relation(fields: [unitId], references: [id])
+  createdBy    AdminUser?         @relation("LessonCreatedBy", fields: [createdById], references: [id])
+  materials    LearningMaterial[]
+  userProgress UserProgress[]
+
+  @@unique([unitId, urutan])
+}
+
+model LearningMaterial {
+  id         String        @id @default(cuid())
+  lessonId   String
+  judul      String
+  deskripsi  String?
+  tipe       MaterialType // VIDEO | ARTIKEL | KUIS
+  isRequired Boolean       @default(true)
+  xpReward   Int           @default(5)
+  contentUrl String? // URL Video eksternal atau path storage
+  isiArtikel String?       @db.Text
+  status     ContentStatus @default(DRAFT)
+  createdAt  DateTime      @default(now())
+  updatedAt  DateTime      @updatedAt
+
+  lesson        Lesson         @relation(fields: [lessonId], references: [id])
+  quizQuestions QuizQuestion[]
+}
+
+model QuizQuestion {
+  id           String        @id @default(cuid())
+  materialId   String
+  pertanyaan   String
+  opsi         Json // Array string opsi jawaban (min 2)
+  jawabanBenar Int // Index jawaban benar
+  penjelasan   String?
+  status       ContentStatus @default(PUBLISHED)
+
+  material LearningMaterial @relation(fields: [materialId], references: [id], onDelete: Cascade)
+}
+
+model CaseStudy {
+  id          String        @id @default(cuid())
+  judul       String
+  konteks     String // Daily | Peer | Public Speaking
+  kategori    String
+  difficulty  String // Mudah | Sedang | Sulit
+  durasiMaks  Int           @default(120) // 30 - 120 detik
+  promptBrief String        @db.Text
+  keyPoints   Json // Array 3-5 poin: [{ label: string, triggers: string[] }]
+  status      ContentStatus @default(DRAFT)
+  createdById String?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  createdBy    AdminUser?    @relation("CaseCreatedBy", fields: [createdById], references: [id])
+  testSessions TestSession[]
+}
+
+// 6. SESI COMMUNICATION TEST, METRIK RUMUS CI & FEEDBACK AI (Bagian 9, 10, 20)
+model TestSession {
+  id              String        @id @default(cuid())
+  userId          String
+  caseId          String?
+  tipe            SessionType   @default(TEST)
+  parentSessionId String? // Menunjuk sesi asal untuk Retest (RT-2)
+  lessonId        String?
+  entryPoint      String        @default("tab_test") // tab_test | lesson
+  attemptNo       Int           @default(1)
+  audioPath       String?
+  audioDuration   Float // Detik (30-120s untuk test, >=20s untuk daily)
+  audioExpiresAt  DateTime // Otomatis +30 hari (PRV-1)
+  transcript      String        @db.Text
+  isPartial       Boolean       @default(false) // Fallback tingkat 2 (TST-8/9)
+  status          SessionStatus @default(COMPLETED)
+  createdAt       DateTime      @default(now())
+
+  user          User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  caseStudy     CaseStudy?      @relation(fields: [caseId], references: [id])
+  parentSession TestSession?    @relation("RetestRelation", fields: [parentSessionId], references: [id])
+  retests       TestSession[]   @relation("RetestRelation")
+  metrics       SpeechMetrics?
+  result        AnalysisResult?
+}
+
+model SpeechMetrics {
+  id                 String @id @default(cuid())
+  sessionId          String @unique
+  durasiBicara       Float
+  jumlahKata         Int
+  wpm                Float
+  jumlahFiller       Int
+  fillerPerMenit     Float
+  jumlahJedaPanjang  Int
+  totalDurasiJeda    Float
+  rasioJeda          Float
+  pauseThresholdUsed Float  @default(1.5) // Detik (Bagian 19.5)
+  cakupanKeyPoints   Json // Detail poin tertangkap & belum
+  skorStruktur       Float
+
+  session TestSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+}
+
+model AnalysisResult {
+  id                 String   @id @default(cuid())
+  sessionId          String   @unique
+  skorJeda           Float? // Kosong bila isPartial = true
+  skorFiller         Float
+  skorTempo          Float
+  skorCakupan        Float? // Kosong untuk Daily Challenge
+  skorStruktur       Float
+  communicationIndex Float // 0 - 100 (Deterministik)
+  kategori           String // Perlu Latihan | Berkembang | Baik | Sangat Baik
+  formulaVersion     String   @default("v1.4")
+  isPartial          Boolean  @default(false)
+  aiFeedback         Json? // Diisi saat pengguna klik "Tampilkan Feedback AI"
+  aiPromptVersion    String?
+  aiModelName        String?
+  createdAt          DateTime @default(now())
+
+  session          TestSession      @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  feedbackAccesses FeedbackAccess[]
+  feedbackRating   FeedbackRating?
+}
+
+model FeedbackAccess {
+  id           String   @id @default(cuid())
+  userId       String
+  resultId     String
+  status       String   @default("success")
+  quotaCharged Boolean  @default(true)
+  createdAt    DateTime @default(now())
+
+  user   User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  result AnalysisResult @relation(fields: [resultId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, resultId]) // Menjamin Idempotency (FB-2 & FB-3)
+}
+
+model FeedbackRating {
+  id        String   @id @default(cuid())
+  resultId  String   @unique
+  userId    String
+  rating    Int // 1 - 5
+  komentar  String?
+  createdAt DateTime @default(now())
+
+  result AnalysisResult @relation(fields: [resultId], references: [id], onDelete: Cascade)
+  user   User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model UserProgress {
+  id           String    @id @default(cuid())
+  userId       String
+  lessonId     String
+  status       String    @default("unlocked") // locked | unlocked | completed
+  videoWatched Boolean   @default(false)
+  articleRead  Boolean   @default(false)
+  scoreKuis    Int?
+  completedAt  DateTime?
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  lesson Lesson @relation(fields: [lessonId], references: [id])
+
+  @@unique([userId, lessonId])
+}
+
+model UserDailyChallenge {
+  id          String   @id @default(cuid())
+  userId      String
+  challengeId String
+  status      String   @default("completed")
+  xpAwarded   Int      @default(10)
+  completedAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model XPLog {
+  id              String   @id @default(cuid())
+  userId          String
+  sumberAktivitas String // daily_challenge | test | retest | video | artikel | kuis
+  refId           String? // case_id atau lesson_id untuk anti-farming (Bagian 13.1)
+  jumlahXp        Int
+  createdAt       DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model StreakLog {
+  id           String @id @default(cuid())
+  userId       String
+  date         String // YYYY-MM-DD
+  activityType String
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, date])
+}
+
+model Subscription {
+  id         String    @id @default(cuid())
+  userId     String
+  plan       String // free | plus_monthly | plus_yearly | sprint_7d
+  status     String    @default("inactive")
+  dailyQuota Int       @default(3)
+  startedAt  DateTime?
+  expiresAt  DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
