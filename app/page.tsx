@@ -221,9 +221,11 @@ export default function HomeApp() {
   const [isRecording, setIsRecording] = useState<boolean>(false);
   const [recordDuration, setRecordDuration] = useState<number>(0);
   const [reRecordLeft, setReRecordLeft] = useState<number>(2);
-  const [transcript, setTranscript] = useState<string>(
-    "Halo teman-teman, terima kasih sudah diajak ikut kepanitiaan luar kampus sore ini. Namun mohon maaf aku belum bisa ikut karena ada jadwal kelas pengganti kuliah jam empat sore sampai enam. Semoga acaranya sukses dan lain kali kabari lagi ya."
-  );
+  const [transcript, setTranscript] = useState<string>("");
+  const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  const [sttStatus, setSttStatus] = useState<"idle" | "uploading" | "done" | "error">("idle");
+  const [sttError, setSttError] = useState<string | null>(null);
+  const [micReady, setMicReady] = useState<boolean>(false);
   const [isSubmittingTest, setIsSubmittingTest] = useState<boolean>(false);
   const [calculatedResult, setCalculatedResult] = useState<{
     communicationIndex: number;
@@ -251,6 +253,24 @@ export default function HomeApp() {
   const [onboardingModal, setOnboardingModal] = useState<boolean>(false);
 
   const timerRef = useRef<NodeJS.Timeout | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const audioStreamRef = useRef<MediaStream | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const rafRef = useRef<number | null>(null);
+  const waveBarsRef = useRef<HTMLDivElement | null>(null);
+  const audioUrlRef = useRef<string | null>(null);
+
+  // Bersihkan stream/audioURL saat unmount
+  useEffect(() => {
+    return () => {
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      audioStreamRef.current?.getTracks().forEach((t) => t.stop());
+      audioContextRef.current?.close().catch(() => {});
+      if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current);
+    };
+  }, []);
 
   const showToast = (msg: string) => {
     setToastMsg(msg);
@@ -271,13 +291,148 @@ export default function HomeApp() {
     };
   }, [isRecording]);
 
-  const startRecording = () => {
+  // ===== Waveform real-time dari AnalyserNode (audio mikrofon nyata) =====
+  const startWaveAnimation = () => {
+    const analyser = analyserRef.current;
+    if (!analyser) return;
+    const bufLen = analyser.frequencyBinCount;
+    const dataArr = new Uint8Array(bufLen);
+    const loop = () => {
+      analyser.getByteFrequencyData(dataArr);
+      const container = waveBarsRef.current;
+      if (container) {
+        const bars = container.children;
+        const n = bars.length;
+        for (let i = 0; i < n; i++) {
+          const sample = dataArr[Math.floor((i / n) * bufLen)] || 0;
+          const h = Math.max(10, Math.min(100, (sample / 255) * 120));
+          const el = bars[i] as HTMLElement;
+          el.style.height = `${h}%`;
+          el.style.opacity = "1";
+        }
+      }
+      rafRef.current = requestAnimationFrame(loop);
+    };
+    rafRef.current = requestAnimationFrame(loop);
+  };
+
+  const stopWaveAnimation = () => {
+    if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    rafRef.current = null;
+  };
+
+  const pickSupportedMime = (): string => {
+    const candidates = [
+      "audio/webm;codecs=opus",
+      "audio/webm",
+      "audio/ogg;codecs=opus",
+      "audio/mp4",
+    ];
+    if (typeof window === "undefined" || typeof MediaRecorder === "undefined") return "";
+    for (const type of candidates) {
+      try {
+        if (MediaRecorder.isTypeSupported(type)) return type;
+      } catch {
+        /* abaikan */
+      }
+    }
+    return "";
+  };
+
+  // ===== Upload audio ke /api/stt (Groq Whisper) =====
+  const transcribeAudio = async (blob: Blob) => {
+    setSttStatus("uploading");
+    setSttError(null);
+    try {
+      const fd = new FormData();
+      const ext = blob.type.includes("mp4") ? "mp4" : blob.type.includes("ogg") ? "ogg" : "webm";
+      fd.append("audio", blob, `recording.${ext}`);
+      fd.append("language", "id");
+      const res = await fetch("/api/stt", { method: "POST", body: fd });
+      const data = await res.json();
+      if (data.success && typeof data.transcript === "string") {
+        setTranscript(data.transcript);
+        setSttStatus("done");
+        showToast("✅ Transkripsi Speech-to-Text (Groq Whisper) selesai.");
+      } else {
+        setSttStatus("error");
+        setSttError(data.message || "Gagal mentranskripsi audio.");
+        showToast(data.message || "STT gagal. Anda dapat mengetik transkrip manual.");
+      }
+    } catch {
+      setSttStatus("error");
+      setSttError("Koneksi ke server STT gagal. Periksa jaringan / GROQ_API_KEY.");
+      showToast("STT tidak terjangkau. Silakan periksa konfigurasi server.");
+    }
+  };
+
+  const startRecording = async () => {
     if (user.sessionsLeft <= 0) {
       showToast("Kuota harian sesi latihan Anda telah habis (Maks 5 sesi).");
       return;
     }
-    setIsRecording(true);
-    setRecordDuration(0);
+    if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+      showToast("Browser ini tidak mendukung perekaman audio (MediaRecorder). Gunakan Chrome/Edge terbaru.");
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      audioStreamRef.current = stream;
+      setMicReady(true);
+
+      // Setup AnalyserNode untuk waveform nyata
+      try {
+        const AudioCtxClass = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+        const actx = new AudioCtxClass();
+        audioContextRef.current = actx;
+        const srcNode = actx.createMediaStreamSource(stream);
+        const analyser = actx.createAnalyser();
+        analyser.fftSize = 256;
+        srcNode.connect(analyser);
+        analyserRef.current = analyser;
+        startWaveAnimation();
+      } catch {
+        analyserRef.current = null;
+      }
+
+      audioChunksRef.current = [];
+      const mime = pickSupportedMime();
+      const recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+      recorder.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) audioChunksRef.current.push(e.data);
+      };
+      recorder.onstop = () => {
+        stopWaveAnimation();
+        const type = recorder.mimeType || mime || "audio/webm";
+        const blob = new Blob(audioChunksRef.current, { type });
+        if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current);
+        const url = URL.createObjectURL(blob);
+        audioUrlRef.current = url;
+        setAudioUrl(url);
+        stream.getTracks().forEach((t) => t.stop());
+        audioContextRef.current?.close().catch(() => {});
+        audioContextRef.current = null;
+        analyserRef.current = null;
+        setMicReady(false);
+        transcribeAudio(blob);
+      };
+
+      mediaRecorderRef.current = recorder;
+      setTranscript("");
+      setSttStatus("idle");
+      setSttError(null);
+      setRecordDuration(0);
+      setIsRecording(true);
+      recorder.start();
+      showToast("🎙️ Mikrofon aktif — mulai bicara.");
+    } catch (err) {
+      setIsRecording(false);
+      setMicReady(false);
+      const msg = err instanceof Error && err.name === "NotAllowedError"
+        ? "Izin mikrofon ditolak. Aktifkan akses mikrofon pada browser lalu ulangi."
+        : "Gagal mengakses mikrofon. Pastikan perangkat audio tersedia.";
+      showToast(msg);
+    }
   };
 
   const stopRecording = () => {
@@ -285,7 +440,11 @@ export default function HomeApp() {
     if (recordDuration < 10) {
       showToast("Durasi rekaman minimal 10 detik untuk evaluasi yang akurat.");
     }
-    setTestStep(3); // To review STT
+    const rec = mediaRecorderRef.current;
+    if (rec && rec.state !== "inactive") {
+      rec.stop(); // memicu onstop -> transcribeAudio
+    }
+    setTestStep(3); // Tinjau STT (status: uploading -> done/error)
   };
 
   const handleRetake = () => {
@@ -295,11 +454,23 @@ export default function HomeApp() {
     }
     setReRecordLeft((prev) => prev - 1);
     setRecordDuration(0);
+    setTranscript("");
+    setSttStatus("idle");
+    setSttError(null);
+    if (audioUrlRef.current) {
+      URL.revokeObjectURL(audioUrlRef.current);
+      audioUrlRef.current = null;
+    }
+    setAudioUrl(null);
     setTestStep(2);
     showToast(`Sisa kesempatan re-record: ${reRecordLeft - 1}`);
   };
 
   const submitTestForAnalysis = async () => {
+    if (!transcript || transcript.trim().length === 0) {
+      showToast("Transkrip masih kosong. Selesaikan rekaman/STT atau ketik manual sebelum menganalisis.");
+      return;
+    }
     setIsSubmittingTest(true);
     try {
       const res = await fetch("/api/test/submit", {
@@ -808,11 +979,11 @@ model Subscription {
             <div>
               <div className="flex items-center gap-2">
                 <span className="font-bold tracking-tight text-sm sm:text-base">TAMPIL</span>
-                <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-400/30">
+                {/* <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-400/30">
                   Next.js + Prisma + Tailwind
-                </span>
+                </span> */}
               </div>
-              <p className="text-[11px] text-slate-400">AI Communication Coach • Adaptasi PRD v1.4</p>
+              <p className="text-[11px] text-slate-400">AI Communication Coach</p>
             </div>
           </div>
 
@@ -855,11 +1026,11 @@ model Subscription {
 
           <div className="flex items-center gap-2">
             <button
-              onClick={() => setOnboardingModal(true)}
+              onClick={() => (true)}
               className="text-xs font-medium px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 flex items-center gap-1.5 transition"
             >
               <UserCog className="w-3.5 h-3.5 text-cyan-400" />
-              Simulasi Age Gate & Onboarding
+              login
             </button>
           </div>
         </div>
@@ -1319,21 +1490,23 @@ model Subscription {
                         </span>
                         <p className="text-xs text-slate-400 mt-1">
                           {isRecording
-                            ? "Sedang Merekam... Bicaralah secara tenang dan runtut."
-                            : "Siap merekam. Tekan tombol Mulai di bawah."}
+                            ? (micReady
+                              ? "Sedang Merekam... Bicaralah secara tenang dan runtut."
+                              : "Menunggu izin mikrofon...")
+                            : "Siap merekam. Tekan tombol Mulai di bawah (butuh izin mikrofon)."}
                         </p>
                       </div>
 
-                      {/* Live Waveform Simulation */}
-                      <div className="flex items-center justify-center gap-1.5 h-14">
+                      {/* Live Waveform (audio nyata via AnalyserNode) */}
+                      <div ref={waveBarsRef} className="flex items-center justify-center gap-1.5 h-14">
                         {[40, 75, 55, 90, 60, 85, 45, 95, 70, 50, 80, 65, 90, 45].map((h, i) => (
                           <div
                             key={i}
-                            className={`w-1.5 rounded-full bg-cyan-400 transition-all ${
+                            className={`w-1.5 rounded-full bg-cyan-400 transition-[height] duration-75 ${
                               isRecording ? "wave-bar" : "opacity-30"
                             }`}
                             style={{
-                              height: isRecording ? `${h}%` : "20%",
+                              height: `${isRecording ? h : 20}%`,
                               animationDelay: `${i * 0.08}s`,
                             }}
                           ></div>
@@ -1396,6 +1569,38 @@ model Subscription {
                       </p>
                     </div>
 
+                    {/* Status STT */}
+                    {sttStatus === "uploading" && (
+                      <div className="flex items-center gap-3 p-4 rounded-2xl bg-indigo-50 border border-indigo-200 text-sm text-indigo-800">
+                        <Sparkles className="w-5 h-5 animate-spin" />
+                        <span className="font-semibold">Mentranskripsi audio via Groq Whisper… Tunggu sebentar.</span>
+                      </div>
+                    )}
+                    {sttStatus === "error" && (
+                      <div className="flex items-start gap-3 p-4 rounded-2xl bg-amber-50 border border-amber-200 text-xs sm:text-sm text-amber-900">
+                        <AlertCircle className="w-5 h-5 shrink-0 mt-0.5" />
+                        <div className="space-y-1">
+                          <p className="font-bold">Speech-to-Text belum berhasil</p>
+                          <p>{sttError}</p>
+                          <p className="text-amber-800">Anda tetap dapat mengetik/memperbaiki transkrip secara manual di bawah, lalu lanjut analisis.</p>
+                        </div>
+                      </div>
+                    )}
+                    {sttStatus === "done" && (
+                      <div className="flex items-center gap-2 text-xs font-semibold text-emerald-700">
+                        <CheckCircle2 className="w-4 h-4" />
+                        <span>Transkrip dari audio berhasil dibuat. Silakan tinjau & perbaiki bila perlu.</span>
+                      </div>
+                    )}
+
+                    {/* Pemutaran audio hasil rekam */}
+                    {audioUrl && (
+                      <div className="space-y-1.5">
+                        <span className="text-xs font-bold text-slate-700">Audio Ter rekam:</span>
+                        <audio controls src={audioUrl} className="w-full h-10 rounded-xl" />
+                      </div>
+                    )}
+
                     <div className="space-y-2">
                       <label className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
                         <FileText className="w-4 h-4 text-indigo-600" />
@@ -1405,7 +1610,13 @@ model Subscription {
                         rows={4}
                         value={transcript}
                         onChange={(e) => setTranscript(e.target.value)}
-                        className="w-full p-4 rounded-2xl bg-white border border-indigo-200 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 leading-relaxed shadow-inner"
+                        disabled={sttStatus === "uploading"}
+                        placeholder={
+                          sttStatus === "uploading"
+                            ? "Menunggu hasil transkripsi dari Groq Whisper…"
+                            : "Tidak ada transkrip. Rekam ulang atau ketik hasil ucapan Anda di sini."
+                        }
+                        className="w-full p-4 rounded-2xl bg-white border border-indigo-200 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 leading-relaxed shadow-inner disabled:opacity-60"
                       />
                     </div>
 
@@ -1421,7 +1632,7 @@ model Subscription {
 
                       <button
                         onClick={submitTestForAnalysis}
-                        disabled={isSubmittingTest}
+                        disabled={isSubmittingTest || sttStatus === "uploading"}
                         className="btn-primary-tampil text-xs sm:text-sm"
                       >
                         {isSubmittingTest ? (
@@ -2281,67 +2492,7 @@ model UserStats {
         </div>
       )}
 
-      {/* ================================================================= */}
-      {/* MODAL: SIMULASI ONBOARDING & AGE GATE                              */}
-      {/* ================================================================= */}
-      {onboardingModal && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="card-tampil max-w-xl w-full p-6 sm:p-8 space-y-5">
-            <div className="flex items-center justify-between border-b border-slate-200 pb-3">
-              <h3 className="font-bold text-base text-slate-900">Simulasi Onboarding & Age Gate (PRD 6)</h3>
-              <button onClick={() => setOnboardingModal(false)} className="text-slate-400 hover:text-slate-600">
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <div className="space-y-3 text-xs">
-              <div>
-                <label className="font-bold text-slate-700">Tahun Lahir:</label>
-                <input
-                  type="number"
-                  defaultValue={2006}
-                  className="w-full mt-1 p-2.5 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
-                />
-                <span className="text-[11px] text-emerald-600 font-semibold">✓ Memenuhi syarat usia 18+ tahun (PRD AUTH-2)</span>
-              </div>
-
-              <div>
-                <label className="font-bold text-slate-700">Tujuan Utama Belajar:</label>
-                <select className="w-full mt-1 p-2.5 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500/20">
-                  <option>Presentasi di Kelas & Diskusi Kuliah</option>
-                  <option>Percakapan Santai Teman Sebaya</option>
-                  <option>Wawancara Magang / Kerja</option>
-                </select>
-              </div>
-
-              <div className="space-y-2 pt-2 border-t border-slate-100">
-                <label className="flex items-start gap-2 cursor-pointer">
-                  <input type="checkbox" defaultChecked className="mt-0.5 rounded text-indigo-600" />
-                  <span>Saya menyetujui Syarat Ketentuan & Kebijakan Privasi (AUTH-3)</span>
-                </label>
-                <label className="flex items-start gap-2 cursor-pointer">
-                  <input type="checkbox" defaultChecked className="mt-0.5 rounded text-indigo-600" />
-                  <span>Saya memberikan izin akses mikrofon untuk perekaman suara (AUTH-4)</span>
-                </label>
-                <label className="flex items-start gap-2 cursor-pointer">
-                  <input type="checkbox" defaultChecked className="mt-0.5 rounded text-indigo-600" />
-                  <span>Saya menyetujui pemrosesan AI pihak ketiga (Groq Whisper & LLaMA) (AUTH-5)</span>
-                </label>
-              </div>
-            </div>
-
-            <button
-              onClick={() => {
-                setOnboardingModal(false);
-                showToast("Simulasi onboarding & persetujuan berhasil disimpan!");
-              }}
-              className="btn-primary-tampil w-full text-xs sm:text-sm"
-            >
-              Simpan & Lanjutkan
-            </button>
-          </div>
-        </div>
-      )}
+  
     </div>
   );
 }
