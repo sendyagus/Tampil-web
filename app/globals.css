@@ -1,0 +1,108 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --tampil-indigo: #4F46E5;
+    --tampil-purple: #8B5CF6;
+    --tampil-cyan: #06B6D4;
+    --tampil-navy: #0F172A;
+    --tampil-lavender: #EEF2FF;
+    --tampil-surface: #FFFFFF;
+    --tampil-border: #E2E8F0;
+  }
+
+  body {
+    background-color: #EEF2FF;
+    color: #0F172A;
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+    /* Full desktop layout: minimum viewport width, scroll horizontally on smaller screens */
+    min-width: 1024px;
+  }
+}
+
+/* PRD v1.4 Gradient System */
+.bg-tampil-primary-grad {
+  background: linear-gradient(135deg, #6366F1 0%, #4F46E5 100%);
+}
+
+.bg-tampil-ai-grad {
+  background: linear-gradient(135deg, #A855F7 0%, #4F46E5 100%);
+}
+
+.card-tampil {
+  background-color: #FFFFFF;
+  border-radius: 20px;
+  border: 1px solid #E2E8F0;
+  box-shadow: 0px 8px 24px rgba(79, 70, 229, 0.08);
+}
+
+.btn-primary-tampil {
+  background-color: #4F46E5;
+  color: #FFFFFF;
+  border-radius: 16px;
+  font-weight: 600;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1.25rem;
+  transition: all 0.2s ease;
+}
+
+.btn-primary-tampil:hover:not(:disabled) {
+  background-color: #4338CA;
+  transform: translateY(-1px);
+  box-shadow: 0 6px 16px rgba(79, 70, 229, 0.25);
+}
+
+.btn-primary-tampil:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.btn-secondary-tampil {
+  background-color: #EEF2FF;
+  color: #4F46E5;
+  border-radius: 16px;
+  font-weight: 600;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1.25rem;
+  transition: all 0.2s ease;
+}
+
+.btn-secondary-tampil:hover:not(:disabled) {
+  background-color: #E0E7FF;
+}
+
+.btn-outlined-tampil {
+  background-color: transparent;
+  color: #4F46E5;
+  border: 1.5px solid #4F46E5;
+  border-radius: 16px;
+  font-weight: 600;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1.25rem;
+  transition: all 0.2s ease;
+}
+
+.btn-outlined-tampil:hover:not(:disabled) {
+  background-color: #EEF2FF;
+}
+
+@keyframes pulseWave {
+  0%, 100% { transform: scaleY(0.35); }
+  50% { transform: scaleY(1); }
+}
+
+.wave-bar {
+  animation: pulseWave 0.9s infinite ease-in-out;
+}
