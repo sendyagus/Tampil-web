@@ -53,7 +53,7 @@ export async function POST(req: NextRequest) {
     const jumlahJedaPanjang = Math.min(6, Math.max(1, ellipsesCount + (jumlahFiller > 3 ? 2 : 1)));
     const totalDurasiJeda = Number((jumlahJedaPanjang * 1.8).toFixed(1));
     const rasioJeda = Number((totalDurasiJeda / durasiDetik).toFixed(3));
-    let skorJeda = Math.max(45, Math.round(100 - (jumlahJedaPanjang - 1) * 14));
+    const skorJeda = Math.max(45, Math.round(100 - (jumlahJedaPanjang - 1) * 14));
 
     // 4. Deteksi Cakupan Key Points
     let keyPointsDetail = [
